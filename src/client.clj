@@ -2,7 +2,12 @@
   (:require [clojure.data.json :as json]
             [clj-http.client :as client]
             [clojure.set :as set]
-            [java-time :as t]))
+            [java-time :as t]
+            [clojure.walk :as walk]
+            [clojure.string :as str])
+  (:import (javax.crypto Mac)
+           (javax.crypto.spec SecretKeySpec)
+           (org.apache.commons.codec.binary Base64)))
 
 ;;https://testnet.binance.vision/
 ;;https://binance-docs.github.io/apidocs/spot/en/#change-log
@@ -10,32 +15,64 @@
 ;; --------------------------------------------------------------------------------
 ;;
 ;; Spot API URL
-(def api-endpoints {:api "https://api.binance.com/api"
-                    :api1 "https://api1.binance.com/api"
-                    :api2 "https://api2.binance.com/api"
-                    :api3 "https://api3.binance.com/api"
-                    :wss "wss:// stream.binance.com:9443/ws"
-                    :wss-stream "wss:// stream.binance.com:9443/stream"})
+(def api {:api "https://api.binance.com/api"
+          :api1 "https://api1.binance.com/api"
+          :api2 "https://api2.binance.com/api"
+          :api3 "https://api3.binance.com/api"
+          :wss "wss:// stream.binance.com:9443/ws"
+          :wss-stream "wss:// stream.binance.com:9443/stream"
+          :bin-keys (read-string (slurp "/Users/mendel/.crypto/binance"))})
 
 ;; Spot Test Network URL
-(def api-endpoints-test {:api "https://testnet.binance.vision/api"
-                         :wss "wss://testnet.binance.vision/ws"
-                         :wss-stream "wss://testnet.binance.vision/stream"})
+(def api-test {:api "https://testnet.binance.vision/api"
+               :wss "wss://testnet.binance.vision/ws"
+               :wss-stream "wss://testnet.binance.vision/stream"
+               :bin-keys (read-string (slurp "/Users/mendel/.crypto/binance-test"))})
 
 (def version "/v3")
 
 ;; --------------------------------------------------------------------------------
 ;; API and Security keys
-(def bin-keys (read-string (slurp "/Users/mendel/.crypto/binance")))
-(def bin-test-keys (read-string (slurp "/Users/mendel/.crypto/binance-test")))
+;;(def bin-keys (read-string (slurp "/Users/mendel/.crypto/binance")))
+;;(def bin-test-keys (read-string (slurp "/Users/mendel/.crypto/binance-test")))
+
+;; --------------------------------------------------------------------------------
+;; Time
+(defn timestamp [] (System/currentTimeMillis))
+
+(defn utc+ [hrs date-time] (t/plus date-time (t/hours hrs)))
+
+(defn inst-time
+  ([timestamp]
+   (inst-time 0 timestamp))
+  ([+hrs timestamp]
+   (->> timestamp t/instant (utc+ +hrs))))
+
+(defn str-time
+  ([timestamp]
+   (str-time 0 timestamp))
+  ([+hrs timestamp]
+   (str (inst-time +hrs timestamp))))
+
+(let [ts (timestamp)]
+  [;;ts
+   ;;(str (t/offset-date-time))
+   ;;(str (t/instant (timestamp)))
+   (str (->> ts inst-time (utc+ 1)))
+   (str-time ts)
+   (str-time 1 ts)
+   ;;(t/offset-date-time)
+   ;;(t/zoned-date-time)
+   ])
+
 
 ;; --------------------------------------------------------------------------------
 ;;
 (defn make-url
-  ([api-endpoints path]
-   (str (:api api-endpoints) version path))
-  ([api-endpoints path query]
-   (str (:api api-endpoints) version path)))
+  ([api path]
+   (str (:api api) version path))
+  ([api path query]
+   (str (:api api) version path)))
 
 ;;:cached :request-time :repeatable? :protocol-version :streaming? :http-client :chunked? :reason-phrase
 ;; :headers :orig-content-encoding :status :length :body :trace-redirects)
@@ -62,56 +99,87 @@
   (client/get url {:async? true} ok-fn error-fn))
 
 (defn get-sync
-  [url query]
-  (client/get url {:query-params query}))
+  ([url]
+   (client/get url))
+  ([url query]
+   (client/get url {:query-params query})))
 
-(defn body [res] (->> res :body json/read-str))
+(defn nice-body [res] (update res :body json/read-str))
+(defn kwordize
+  [xs]
+  (if (sequential? xs)
+    (map walk/keywordize-keys xs)
+    (walk/keywordize-keys xs)))
 
-;; --------------------------------------------------------------------------------
-;; Time
-(defn timestamp [] (System/currentTimeMillis))
-(defn utc+ [hs date-time] (t/plus date-time (t/hours hs)))
-(defn human-readable-time
-  ([timestamp]
-   (t/instant timestamp))
-  ([+hs timestamp]
-   (->> timestamp human-readable-time (utc+ +hs))))
+(defn hr-time
+  [+hrs xs]
+  (let [readable (fn [x]
+                   (cond-> x
+                           (:time x) (update :time (partial str-time +hrs))))]
+    (if (sequential? xs)
+      (mapv readable xs)
+      (readable xs))))
 
-[(timestamp)
- (str (t/offset-date-time))
- (str (t/instant (timestamp)))]
-(->> 1645990118821 human-readable-time (utc+ 1))
-(->> 1645990118821 (human-readable-time 1))
-(t/instant 1645990400838)
-(t/offset-date-time)
-(t/zoned-date-time)
+(defn- hmac
+  "Calculate HMAC signature for given data.
+  https://gist.github.com/jhickner/2382543"
+  [^String key ^String data]
+  (let [hmac-sha-256 "HmacSHA256"
+        signing-key (SecretKeySpec. (.getBytes key) hmac-sha-256)
+        mac (doto (Mac/getInstance hmac-sha-256) (.init signing-key))]
+    (String. (Base64/encodeBase64
+              (.doFinal mac (.getBytes data)))
+             "UTF-8")))
+
+(defn- sign
+  [api body]
+  (let [secret-key (->> api :bin-keys :BINANCE_API_SECRET)
+        string-to-sign (->> body
+                            (map (fn [[k v]] (str k "=" v)))
+                            (str/join "&"))]
+    (assoc body "signature" (hmac secret-key string-to-sign))))
 
 ;; --------------------------------------------------------------------------------
 ;; Paths
+
 (def path-exchange-info "/exchangeInfo")
 (def ping "/ping")
 (def the-time "/time")
 (def trades "/trades")
 (def price "/ticker/price")
 (def book-ticker "/ticker/bookTicker")
+;; Trade
+(def test-trade "/order/test")
 
 ;; --------------------------------------------------------------------------------
 ;; Playground
+
+;; Header
+;;["X-MBX-APIKEY" (->> api :bin-keys :BINANCE_API_KEY)]
+;;["X-MBX-APIKEY" (->> api-test :bin-keys :BINANCE_API_KEY)]
+
 (comment
- (let [api-endpoints api-endpoints-test
-       path path-exchange-info
-       path trades
-       url (make-url api-endpoints path)
-       _ (println "\nURL" url)
-       ;;trades
-       res (get-sync url {"symbol" "BTCUSDT" "limit" "10"})
-       ;;res (get-sync url {"symbol" "BTCUSDT"})
-       meta (dissoc res :body)
-       ;;symbols (->> (get body "symbols")
-       ;;             (map #(get % "symbol")))
-       ]
-   ;;(keys res)
-   ;;(assoc res :body (body res))
-   (body res)
-   ;;symbols
-   ))
+ ;; Test trade
+ (let [api api-test
+       url (make-url api test-trade)
+       body {"symbol" "BTCBUSD"
+             "side" "BUY"
+             "type" "MARKET"
+             "timestamp" 1 #_(timestamp)}]
+   (println "\nURL" url)
+   (println "\nWITH SIGNATURE") (clojure.pprint/pprint (sign api body))
+   #_(->> (nice-body (get-sync url body))
+        ;;:body
+        ;;kwordize
+        ;;(hr-time 1)
+        )))
+
+(comment
+ ;; Trades
+ (let [api-endpoints api ;;-test
+       url (make-url api-endpoints trades)]
+   (println "\nURL" url)
+   (->> (nice-body (get-sync url {"symbol" "BTCBUSD" "limit" "1"}))
+        :body
+        kwordize
+        (hr-time 1))))
