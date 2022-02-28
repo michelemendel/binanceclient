@@ -102,9 +102,24 @@
   ([url]
    (client/get url))
   ([url query]
-   (client/get url {:query-params query})))
+   (client/get url {:query-params query}))
+  ([url query headers]
+   (client/get url {:query-params query
+                    :headers headers})))
+
+(defn post-sync
+  [url body headers]
+  (let [full-body {:body (json/write-str body)
+                   :headers headers
+                   :content-type :application/x-www-form-urlencoded
+                   :accept :json}]
+    ;;todo mendel remove
+    (println "\n")
+    (clojure.pprint/pprint full-body)
+    (client/post url full-body)))
 
 (defn nice-body [res] (update res :body json/read-str))
+
 (defn kwordize
   [xs]
   (if (sequential? xs)
@@ -154,10 +169,6 @@
 ;; --------------------------------------------------------------------------------
 ;; Playground
 
-;; Header
-;;["X-MBX-APIKEY" (->> api :bin-keys :BINANCE_API_KEY)]
-;;["X-MBX-APIKEY" (->> api-test :bin-keys :BINANCE_API_KEY)]
-
 (comment
  ;; Test trade
  (let [api api-test
@@ -165,18 +176,34 @@
        body {"symbol" "BTCBUSD"
              "side" "BUY"
              "type" "MARKET"
-             "timestamp" 1 #_(timestamp)}]
+             "timeInForce" "GTC"
+             "quantity" 0.001
+             "recvWindow" 5000
+             "timestamp" (timestamp)}
+       headers {"X-MBX-APIKEY" (->> api :bin-keys :BINANCE_API_KEY)}]
    (println "\nURL" url)
-   (println "\nWITH SIGNATURE") (clojure.pprint/pprint (sign api body))
-   #_(->> (nice-body (get-sync url body))
+   (->> (post-sync url (sign api body) headers)
+        ;;nice-body
         ;;:body
         ;;kwordize
         ;;(hr-time 1)
         )))
 
 (comment
+ ;; Path Exchange Info - symbols
+ (let [api-endpoints api-test
+       url (make-url api-endpoints path-exchange-info)]
+   (println "\nURL" url)
+   (->> (nice-body (get-sync url))
+        :body
+        kwordize
+        :symbols
+        (map :symbol)
+        clojure.pprint/pprint)))
+
+(comment
  ;; Trades
- (let [api-endpoints api ;;-test
+ (let [api-endpoints api-test
        url (make-url api-endpoints trades)]
    (println "\nURL" url)
    (->> (nice-body (get-sync url {"symbol" "BTCBUSD" "limit" "1"}))
