@@ -7,6 +7,7 @@
             [clojure.string :as str])
   (:import (javax.crypto Mac)
            (javax.crypto.spec SecretKeySpec)
+           (java.net URLEncoder)
            (org.apache.commons.codec.binary Base64)))
 
 ;;https://testnet.binance.vision/
@@ -27,7 +28,10 @@
 (def api-test {:api "https://testnet.binance.vision/api"
                :wss "wss://testnet.binance.vision/ws"
                :wss-stream "wss://testnet.binance.vision/stream"
-               :bin-keys (read-string (slurp "/Users/mendel/.crypto/binance-test"))})
+               ;;(read-string (slurp "/Users/mendel/.crypto/binance-test"))
+               :bin-keys {:BINANCE_API_KEY "DH42FxVc3Je3Dr4LTpZJOSZtBSEn7jSNBT5xkIheLOjyoi8fCx71WVOvSSs9jImE"
+                          :BINANCE_API_SECRET "Ok4BiGha91D6s4emwrc2xaASQp0Y6i66FloDc98Ml81Tb9nZRvpHX8SWQuIoO3YL"}})
+
 
 (def version "/v3")
 
@@ -54,28 +58,61 @@
   ([+hrs timestamp]
    (str (inst-time +hrs timestamp))))
 
-(let [ts (timestamp)]
-  [;;ts
-   ;;(str (t/offset-date-time))
-   ;;(str (t/instant (timestamp)))
-   (str (->> ts inst-time (utc+ 1)))
-   (str-time ts)
-   (str-time 1 ts)
-   ;;(t/offset-date-time)
-   ;;(t/zoned-date-time)
-   ])
+(defn hr-time
+  [+hrs xs]
+  (let [readable (fn [x]
+                   (cond-> x
+                           (:time x) (update :time (partial str-time +hrs))))]
+    (if (sequential? xs)
+      (mapv readable xs)
+      (readable xs))))
 
+;; --------------------------------------------------------------------------------
+;; Utils
+
+(defn deserialize-body [res] (update res :body json/read-str))
+
+(defn kwordize
+  [xs]
+  (if (sequential? xs)
+    (map walk/keywordize-keys xs)
+    (walk/keywordize-keys xs)))
+
+(defn stringify-keys
+  [xs]
+  (if (sequential? xs)
+    (map walk/stringify-keys xs)
+    (walk/stringify-keys xs)))
+
+(defn hmac-sha-256
+  "Calculate HMAC signature for given data.
+  https://gist.github.com/jhickner/2382543"
+  [^String key ^String data]
+  (let [hmac-sha-256 "HmacSHA256"
+        hmac-key (SecretKeySpec. (.getBytes key) hmac-sha-256)
+        hmac (doto (Mac/getInstance hmac-sha-256) (.init hmac-key))
+        signature (.doFinal hmac (.getBytes data))]
+    ;; Hex
+    (format "%x" (BigInteger. signature))
+    ;; UTF-8
+    ;;(String. (Base64/encodeBase64 signature) "UTF-8")
+    ))
+
+(defn- sign
+  [api query]
+  (let [secret-key (->> api :bin-keys :BINANCE_API_SECRET)
+        string-to-sign (client/generate-query-string query)]
+    ;;todo mendel remove
+    (println "\nSECRET KEY" secret-key)
+    (println "\nSTRING-TO-SIGN\n" string-to-sign)
+    (assoc query :signature (hmac-sha-256 secret-key string-to-sign))))
 
 ;; --------------------------------------------------------------------------------
 ;;
 (defn make-url
-  ([api path]
-   (str (:api api) version path))
-  ([api path query]
-   (str (:api api) version path)))
+  [api path]
+  (str (:api api) version path))
 
-;;:cached :request-time :repeatable? :protocol-version :streaming? :http-client :chunked? :reason-phrase
-;; :headers :orig-content-encoding :status :length :body :trace-redirects)
 (defn get-ok
   [{:keys [opts status headers] :as resp}]
   ;;(println "\nRESP" (keys resp)) (clojure.pprint/pprint resp)
@@ -108,51 +145,26 @@
                     :headers headers})))
 
 (defn post-sync
-  [url body headers]
-  (let [full-body {:body (json/write-str body)
-                   :headers headers
-                   :content-type :application/x-www-form-urlencoded
-                   :accept :json}]
+  [api url query headers]
+  (let [url+query (str url "?" (client/generate-query-string query))
+        body {;;:query (json/write-str query)
+              ;;:form-params (client/generate-query-string query)
+              ;;:form-params query
+              ;;:as :x-www-form-urlencoded
+              :headers {"X-MBX-APIKEY" (str (->> api :bin-keys :BINANCE_API_KEY))}
+              :content-type :application/x-www-form-urlencoded
+              :accept :json}]
     ;;todo mendel remove
-    (println "\n")
-    (clojure.pprint/pprint full-body)
-    (client/post url full-body)))
+    (println "\nURL+QUERY" url+query)
+    (println "SIGNED QUERY") (clojure.pprint/pprint query)
+    (println "BODY") (clojure.pprint/pprint body)
 
-(defn nice-body [res] (update res :body json/read-str))
+    (println "\nCURL\n" (format "curl -H 'X-MBX-APIKEY: DH42FxVc3Je3Dr4LTpZJOSZtBSEn7jSNBT5xkIheLOjyoi8fCx71WVOvSSs9jImE' -X POST 'https://testnet.binance.vision/api/v3/order/test?%s'" (client/generate-query-string query)))
 
-(defn kwordize
-  [xs]
-  (if (sequential? xs)
-    (map walk/keywordize-keys xs)
-    (walk/keywordize-keys xs)))
+    (println "\nGET SIGNATURE\n" (format "echo -n '%s' | openssl dgst -sha256 -hmac %s" (client/generate-query-string (dissoc query :signature)) (->> api :bin-keys :BINANCE_API_SECRET)))
 
-(defn hr-time
-  [+hrs xs]
-  (let [readable (fn [x]
-                   (cond-> x
-                           (:time x) (update :time (partial str-time +hrs))))]
-    (if (sequential? xs)
-      (mapv readable xs)
-      (readable xs))))
-
-(defn- hmac
-  "Calculate HMAC signature for given data.
-  https://gist.github.com/jhickner/2382543"
-  [^String key ^String data]
-  (let [hmac-sha-256 "HmacSHA256"
-        signing-key (SecretKeySpec. (.getBytes key) hmac-sha-256)
-        mac (doto (Mac/getInstance hmac-sha-256) (.init signing-key))]
-    (String. (Base64/encodeBase64
-              (.doFinal mac (.getBytes data)))
-             "UTF-8")))
-
-(defn- sign
-  [api body]
-  (let [secret-key (->> api :bin-keys :BINANCE_API_SECRET)
-        string-to-sign (->> body
-                            (map (fn [[k v]] (str k "=" v)))
-                            (str/join "&"))]
-    (assoc body "signature" (hmac secret-key string-to-sign))))
+    ;;(client/post url+query body)
+    ))
 
 ;; --------------------------------------------------------------------------------
 ;; Paths
@@ -173,28 +185,26 @@
  ;; Test trade
  (let [api api-test
        url (make-url api test-trade)
-       body {"symbol" "BTCBUSD"
-             "side" "BUY"
-             "type" "MARKET"
-             "timeInForce" "GTC"
-             "quantity" 0.001
-             "recvWindow" 5000
-             "timestamp" (timestamp)}
-       headers {"X-MBX-APIKEY" (->> api :bin-keys :BINANCE_API_KEY)}]
-   (println "\nURL" url)
-   (->> (post-sync url (sign api body) headers)
-        ;;nice-body
-        ;;:body
+       query {:symbol "BTCBUSD"
+              :side "BUY"
+              :type "MARKET"
+              ;;:timeInForce "GTC"
+              :quantity 0.001
+              :recvWindow 20000
+              :timestamp (timestamp)}]
+   (->> (post-sync api url (sign api query) {})
+        ;;nice-query
+        ;;:query
         ;;kwordize
         ;;(hr-time 1)
         )))
 
 (comment
  ;; Path Exchange Info - symbols
- (let [api-endpoints api-test
-       url (make-url api-endpoints path-exchange-info)]
+ (let [api api-test
+       url (make-url api path-exchange-info)]
    (println "\nURL" url)
-   (->> (nice-body (get-sync url))
+   (->> (deserialize-body (get-sync url))
         :body
         kwordize
         :symbols
@@ -203,10 +213,30 @@
 
 (comment
  ;; Trades
- (let [api-endpoints api-test
-       url (make-url api-endpoints trades)]
+ (let [api api-test
+       url (make-url api trades)]
    (println "\nURL" url)
-   (->> (nice-body (get-sync url {"symbol" "BTCBUSD" "limit" "1"}))
+   (->> (deserialize-body (get-sync url {"symbol" "BTCBUSD" "limit" "1"}))
         :body
         kwordize
         (hr-time 1))))
+
+
+;;apiKey	  vmPUZE6mv9SD5VNHk4HlWFsOr6aKE2zvsw0MuIgwCIPy6utIco14y7Ju91duEh8A
+;;secretKey	NhqPtmdSJYdKjVHjA7PZj4Mge3R5YNiP1e3UZjInClVN65XAbvqqM6A7H5fATj0j
+
+;;HMAC SHA256 signature
+;;echo -n "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC&quantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559" | openssl dgst -sha256 -hmac "NhqPtmdSJYdKjVHjA7PZj4Mge3R5YNiP1e3UZjInClVN65XAbvqqM6A7H5fATj0j"
+;;c8db56825ae71d6d79447849e617115f4a920fa2acdcab2b053c4b2838bd6b71
+
+;;My data
+;;echo -n "symbol=BTCBUSD&side=BUY&type=MARKET&timeInForce=GTC&quantity=0.001&recvWindow=5000&timestamp=1646253400101" | openssl dgst -sha256 -hmac "Ok4BiGha91D6s4emwrc2xaASQp0Y6i66FloDc98Ml81Tb9nZRvpHX8SWQuIoO3YL"
+;;04c19b476f154e00fd9d735551e28e2a01ebb560cd2047516c9d325389d189e9
+
+;;curl command
+;;curl -H "X-MBX-APIKEY: vmPUZE6mv9SD5VNHk4HlWFsOr6aKE2zvsw0MuIgwCIPy6utIco14y7Ju91duEh8A" -X POST 'https://api.binance.com/api/v3/order' -d 'symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC&quantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559&signature=c8db56825ae71d6d79447849e617115f4a920fa2acdcab2b053c4b2838bd6b71'
+
+;;My curl command
+;;curl -H "X-MBX-APIKEY: DH42FxVc3Je3Dr4LTpZJOSZtBSEn7jSNBT5xkIheLOjyoi8fCx71WVOvSSs9jImE" -X POST 'https://testnet.binance.vision/api/v3/order/test?symbol=BTCBUSD&side=BUY&type=MARKET&timeInForce=GTC&quantity=0.001&recvWindow=50000&timestamp=1646256437694&signature=-40c539779c9de2803199800090d6a8b9bdd8a235b8b95d7accd76705ddcb03b2'
+
+
