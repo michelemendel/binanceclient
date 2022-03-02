@@ -92,19 +92,19 @@
         hmac-key (SecretKeySpec. (.getBytes key) hmac-sha-256)
         hmac (doto (Mac/getInstance hmac-sha-256) (.init hmac-key))
         signature (.doFinal hmac (.getBytes data))]
-    ;; Hex
-    (format "%x" (BigInteger. signature))
     ;; UTF-8
     ;;(String. (Base64/encodeBase64 signature) "UTF-8")
-    ))
+    ;; Hex
+    ;; The 1 is to make sure it's positive, since we can't have negative valued signatures.
+    (format "%x" (BigInteger. 1 signature))))
 
 (defn- sign
   [api query]
   (let [secret-key (->> api :bin-keys :BINANCE_API_SECRET)
         string-to-sign (client/generate-query-string query)]
     ;;todo mendel remove
-    (println "\nSECRET KEY" secret-key)
-    (println "\nSTRING-TO-SIGN\n" string-to-sign)
+    ;;(println "\nSECRET KEY" secret-key)
+    ;;(println "\nSTRING-TO-SIGN\n" string-to-sign)
     (assoc query :signature (hmac-sha-256 secret-key string-to-sign))))
 
 ;; --------------------------------------------------------------------------------
@@ -155,15 +155,16 @@
               :content-type :application/x-www-form-urlencoded
               :accept :json}]
     ;;todo mendel remove
-    (println "\nURL+QUERY" url+query)
-    (println "SIGNED QUERY") (clojure.pprint/pprint query)
-    (println "BODY") (clojure.pprint/pprint body)
+    ;;(println "\nURL+QUERY" url+query)
+    ;;(println "SIGNED QUERY") (clojure.pprint/pprint query)
+    ;;(println "BODY") (clojure.pprint/pprint body)
+    ;;(println "\nSIGNATURE:" (:signature query))
 
-    (println "\nCURL\n" (format "curl -H 'X-MBX-APIKEY: DH42FxVc3Je3Dr4LTpZJOSZtBSEn7jSNBT5xkIheLOjyoi8fCx71WVOvSSs9jImE' -X POST 'https://testnet.binance.vision/api/v3/order/test?%s'" (client/generate-query-string query)))
+    ;;(println "\nCURL\n" (format "curl -H 'X-MBX-APIKEY: DH42FxVc3Je3Dr4LTpZJOSZtBSEn7jSNBT5xkIheLOjyoi8fCx71WVOvSSs9jImE' -X POST 'https://testnet.binance.vision/api/v3/order/test?%s'" (client/generate-query-string query)))
 
-    (println "\nGET SIGNATURE\n" (format "echo -n '%s' | openssl dgst -sha256 -hmac %s" (client/generate-query-string (dissoc query :signature)) (->> api :bin-keys :BINANCE_API_SECRET)))
+    ;;(println "\nGET SIGNATURE\n" (format "echo -n '%s' | openssl dgst -sha256 -hmac %s" (client/generate-query-string (dissoc query :signature)) (->> api :bin-keys :BINANCE_API_SECRET)))
 
-    ;;(client/post url+query body)
+    (client/post url+query body)
     ))
 
 ;; --------------------------------------------------------------------------------
