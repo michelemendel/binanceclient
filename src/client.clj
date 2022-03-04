@@ -4,9 +4,12 @@
             [clojure.set :as set]
             [java-time :as t]
             [clojure.walk :as walk]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.java.io :as io]
+            [clojure.java.shell :refer [sh]])
   (:import (javax.crypto Mac)
-           (javax.crypto.spec SecretKeySpec)))
+           (javax.crypto.spec SecretKeySpec)
+           (java.io FileReader)))
 
 ;;https://testnet.binance.vision/
 ;;https://binance-docs.github.io/apidocs/spot/en/#change-log
@@ -40,6 +43,11 @@
 
 ;; --------------------------------------------------------------------------------
 ;; Utils
+
+;;Thanks to https://stackoverflow.com/questions/29585928/how-to-substitute-path-to-home-for
+(defn bash [command] (sh "bash" "-c" command))
+(defn expand [path] (:out (bash (str "echo -n " path))))
+(defn bin-bash [curl] (->> (bash curl) :out json/read-str))
 
 (defn deserialize-body [res] (update res :body json/read-str))
 
@@ -87,18 +95,17 @@
           :api3 "https://api3.binance.com"
           :wss "wss:// stream.binance.com:9443/ws"
           :wss-stream "wss:// stream.binance.com:9443/stream"
-          :bin-keys (read-string (slurp "/Users/mendel/.crypto/binance"))})
+          :bin-keys (read-string (slurp (expand "~/.crypto/binance")))})
 
 ;; Spot Test Network URL
 (def api-test {:api "https://testnet.binance.vision"
                :wss "wss://testnet.binance.vision/ws"
                :wss-stream "wss://testnet.binance.vision/stream"
-               ;;(read-string (slurp "/Users/mendel/.crypto/binance-test"))
-               :bin-keys {:BINANCE_API_KEY "DH42FxVc3Je3Dr4LTpZJOSZtBSEn7jSNBT5xkIheLOjyoi8fCx71WVOvSSs9jImE"
-                          :BINANCE_API_SECRET "Ok4BiGha91D6s4emwrc2xaASQp0Y6i66FloDc98Ml81Tb9nZRvpHX8SWQuIoO3YL"}})
+               :bin-keys (read-string (slurp (expand "~/.crypto/binance-test")))})
 
 (def base-paths {:api "/api"
                  :sapi "/sapi"})
+
 (def http-methods {:get client/get
                    :post client/post})
 
@@ -111,6 +118,7 @@
 ;; --------------------------------------------------------------------------------
 ;; Operations
 
+;; Market Data
 (def path-exchange-info {:path "/exchangeInfo"
                          :method :get
                          :base-path :api
@@ -125,18 +133,32 @@
              :sign? false})
 (def price "/ticker/price")
 (def book-ticker "/ticker/bookTicker")
+
 ;; Trade
 (def test-trade {:path "/order/test"
                  :method :post
                  :base-path :api
                  :version 3
                  :sign? true})
-;; User data
+
 (def account {:path "/account"
               :method :get
               :base-path :api
               :version 3
               :sign? true})
+
+;; Margin
+;;/sapi/v1/margin/priceIndex
+(def margin-priceIndex {:path "/margin/priceIndex"
+                        :method :get
+                        :base-path :sapi
+                        :version 1
+                        :sign? false})
+
+;; Wallet
+;; Sub-Account
+;; Stream
+
 
 ;; --------------------------------------------------------------------------------
 ;;
@@ -144,28 +166,39 @@
   [api {:keys [base-path path version] :as op}]
   (str (:api api) (base-path base-paths) "/v" version path))
 
+(defn- make-query-params
+  [api query sign?]
+  (cond-> query
+          sign? (-> identity
+                    (assoc :timestamp (timestamp))
+                    (as-> q (sign api q)))))
+
+(defn- make-headers
+  [api headers sign?]
+  (cond->> headers
+           sign? (merge {"X-MBX-APIKEY" (str (->> api :bin-keys :BINANCE_API_KEY))
+                         :content-type :application/x-www-form-urlencoded})))
+
+(defn make-curl
+  [api {:keys [method sign?] :as op} query]
+  (format "curl%s%s -X %s '%s?%s'"
+          (if sign? (format " -H 'X-MBX-APIKEY: %s'" (->> api :bin-keys :BINANCE_API_KEY))
+                    "")
+          " -H 'accept: application/json'"
+          (method {:get "GET" :post "POST"})
+          (make-url api op)
+          (client/generate-query-string (make-query-params api query sign?))))
+
 (defn request
-  [api {:keys [method sign?] :as op} query headers]
+  [api {:keys [method sign?] :as op} params headers]
   (let [url (make-url api op)
-        query-params (->> (cond-> query
-                                  sign? (#(->> (assoc % :timestamp (timestamp))
-                                               (sign api)))))
-        hdrs (cond->> headers
-                      sign? (merge {"X-MBX-APIKEY" (str (->> api :bin-keys :BINANCE_API_KEY))
-                                    :content-type :application/x-www-form-urlencoded}))
-        data {:query-params query-params
-              :headers (merge hdrs
-                              {:accept :json})}]
+        data {:query-params (make-query-params api params sign?)
+              :headers (make-headers api (merge headers {:accept :json}) sign?)}]
 
     ;;todo mendel remove
     (println "\nOPERATION" op)
     (println "URL" url)
     (println "DATA") (clojure.pprint/pprint data)
-
-    ;;(println "\nCURL\n" (format "curl -H 'X-MBX-APIKEY: %s' -X %s 'https://testnet.binance.vision/api/v3/order/test?%s'"
-    ;;                            (->> api :bin-keys :BINANCE_API_KEY)
-    ;;                            (method {:get "GET" :post "POST"})
-    ;;                            (client/generate-query-string query-params)))
 
     ((method http-methods) url data)))
 
@@ -175,15 +208,33 @@
 (comment
 
  (request api-test account {:recvWindow 20000} {})
+ (bin-bash (make-curl api-test account {:recvWindow 20000}))
+
  (->> (request api-test trades {:symbol "BTCBUSD" :limit "1"} {})
       deserialize-body)
+ (bin-bash (make-curl api-test trades {:symbol "BTCBUSD" :limit "1"}))
+
  (->> (request api-test path-exchange-info {} {})
       deserialize-body)
+ (bin-bash (make-curl api-test path-exchange-info {}))
+
  (request api-test test-trade {:symbol "BTCBUSD"
                                :side "BUY"
                                :type "MARKET"
+                               ;;:timeInForce "GTC"
                                :quantity 0.001
-                               :recvWindow 20000} {}))
+                               :recvWindow 2000} {})
+ (bin-bash (make-curl api-test test-trade {:symbol "BTCBUSD"
+                                           :side "BUY"
+                                           :type "MARKET"
+                                           ;;:timeInForce "GTC"
+                                           :quantity 0.001
+                                           :recvWindow 2000}))
+
+ (request api-test margin-priceIndex {:symbol "BTCBUSD"} {})
+ (make-curl api-test margin-priceIndex {:symbol "BTCBUSD"})
+ (bash (make-curl api-test margin-priceIndex {:symbol "BTCBUSD"}))
+ )
 
 
 
@@ -207,30 +258,4 @@
 
 ;;My curl command
 ;;curl -H "X-MBX-APIKEY: DH42FxVc3Je3Dr4LTpZJOSZtBSEn7jSNBT5xkIheLOjyoi8fCx71WVOvSSs9jImE" -X POST 'https://testnet.binance.vision/api/v3/order/test?symbol=BTCBUSD&side=BUY&type=MARKET&timeInForce=GTC&quantity=0.001&recvWindow=50000&timestamp=1646256437694&signature=-40c539779c9de2803199800090d6a8b9bdd8a235b8b95d7accd76705ddcb03b2'
-
-
-;; --------------------------------------------------------------------------------
-;; Stuff I don't use right now
-
-(defn get-ok
-  [{:keys [opts status headers] :as resp}]
-  ;;(println "\nRESP" (keys resp)) (clojure.pprint/pprint resp)
-  (println "\nstatus" status)
-  (println "\nheaders") (clojure.pprint/pprint headers)
-  ;;(println "\nopts" opts)
-  (println "\nRESPONSE")
-  (clojure.pprint/pprint (->> resp :body json/read-str)))
-
-(defn get-error
-  [resp]
-  (println "\nRESP" (keys resp)) (clojure.pprint/pprint resp)
-  ;;(println "\nstatus" status)
-  ;;(println "\nheaders" headers)
-  ;;(if error (println "Error on" opts "\nERROR\n" error)
-  ;;          (println "Success on" opts))
-  )
-
-(defn get-async
-  [url ok-fn error-fn]
-  (client/get url {:async? true} ok-fn error-fn))
 
