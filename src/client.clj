@@ -78,8 +78,8 @@
     (format "%x" (BigInteger. 1 signature))))
 
 (defn- sign
-  [api query]
-  (let [secret-key (->> api :bin-keys :BINANCE_API_SECRET)
+  [config query]
+  (let [secret-key (->> config :bin-keys :BINANCE_API_SECRET)
         string-to-sign (client/generate-query-string query)]
     ;;todo mendel remove
     ;;(println "\nSECRET KEY" secret-key)
@@ -87,32 +87,32 @@
     (assoc query :signature (hmac-sha-256 secret-key string-to-sign))))
 
 ;; --------------------------------------------------------------------------------
+;; API and Security keys
+;;(read-string (slurp (expand "~/.crypto/binance")))
+;;(read-string (slurp (expand "~/.crypto/binance-test")))
+
+;; --------------------------------------------------------------------------------
 ;;
 ;; Spot API URL
-(def api {:api "https://api.binance.com"
-          :api1 "https://api1.binance.com"
-          :api2 "https://api2.binance.com"
-          :api3 "https://api3.binance.com"
-          :wss "wss:// stream.binance.com:9443/ws"
-          :wss-stream "wss:// stream.binance.com:9443/stream"
-          :bin-keys (read-string (slurp (expand "~/.crypto/binance")))})
+(def config {:api "https://api.binance.com"
+             :api1 "https://api1.binance.com"
+             :api2 "https://api2.binance.com"
+             :api3 "https://api3.binance.com"
+             :wss "wss:// stream.binance.com:9443/ws"
+             :wss-stream "wss:// stream.binance.com:9443/stream"
+             :bin-keys (read-string (slurp (expand "~/.crypto/binance")))})
 
 ;; Spot Test Network URL
-(def api-test {:api "https://testnet.binance.vision"
-               :wss "wss://testnet.binance.vision/ws"
-               :wss-stream "wss://testnet.binance.vision/stream"
-               :bin-keys (read-string (slurp (expand "~/.crypto/binance-test")))})
+(def config-test {:api "https://testnet.binance.vision"
+                  :wss "wss://testnet.binance.vision/ws"
+                  :wss-stream "wss://testnet.binance.vision/stream"
+                  :bin-keys (read-string (slurp (expand "~/.crypto/binance-test")))})
 
 (def base-paths {:api "/api"
                  :sapi "/sapi"})
 
 (def http-methods {:get client/get
                    :post client/post})
-
-;; --------------------------------------------------------------------------------
-;; API and Security keys
-;;(def bin-keys (read-string (slurp "/Users/mendel/.crypto/binance")))
-;;(def bin-test-keys (read-string (slurp "/Users/mendel/.crypto/binance-test")))
 
 
 ;; --------------------------------------------------------------------------------
@@ -163,37 +163,37 @@
 ;; --------------------------------------------------------------------------------
 ;;
 (defn make-url
-  [api {:keys [base-path path version] :as op}]
-  (str (:api api) (base-path base-paths) "/v" version path))
+  [config {:keys [base-path path version] :as op}]
+  (str (:api config) (base-path base-paths) "/v" version path))
 
 (defn- make-query-params
-  [api query sign?]
+  [config query sign?]
   (cond-> query
           sign? (-> identity
                     (assoc :timestamp (timestamp))
-                    (as-> q (sign api q)))))
+                    (as-> q (sign config q)))))
 
 (defn- make-headers
-  [api headers sign?]
+  [config headers sign?]
   (cond->> headers
-           sign? (merge {"X-MBX-APIKEY" (str (->> api :bin-keys :BINANCE_API_KEY))
+           sign? (merge {"X-MBX-APIKEY" (str (->> config :bin-keys :BINANCE_API_KEY))
                          :content-type :application/x-www-form-urlencoded})))
 
 (defn make-curl
-  [api {:keys [method sign?] :as op} query]
+  [config {:keys [method sign?] :as op} query]
   (format "curl%s%s -X %s '%s?%s'"
-          (if sign? (format " -H 'X-MBX-APIKEY: %s'" (->> api :bin-keys :BINANCE_API_KEY))
+          (if sign? (format " -H 'X-MBX-APIKEY: %s'" (->> config :bin-keys :BINANCE_API_KEY))
                     "")
           " -H 'accept: application/json'"
           (method {:get "GET" :post "POST"})
-          (make-url api op)
-          (client/generate-query-string (make-query-params api query sign?))))
+          (make-url config op)
+          (client/generate-query-string (make-query-params config query sign?))))
 
 (defn request
-  [api {:keys [method sign?] :as op} params headers]
-  (let [url (make-url api op)
-        data {:query-params (make-query-params api params sign?)
-              :headers (make-headers api (merge headers {:accept :json}) sign?)}]
+  [config {:keys [method sign?] :as op} params headers]
+  (let [url (make-url config op)
+        data {:query-params (make-query-params config params sign?)
+              :headers (make-headers config (merge headers {:accept :json}) sign?)}]
 
     ;;todo mendel remove
     (println "\nOPERATION" op)
@@ -207,33 +207,33 @@
 
 (comment
 
- (request api-test account {:recvWindow 20000} {})
- (bin-bash (make-curl api-test account {:recvWindow 20000}))
+ (deserialize-body (request config-test account {:recvWindow 20000} {}))
+ (bin-bash (make-curl config-test account {:recvWindow 20000}))
 
- (->> (request api-test trades {:symbol "BTCBUSD" :limit "1"} {})
+ (->> (request config-test trades {:symbol "BTCBUSD" :limit "1"} {})
       deserialize-body)
- (bin-bash (make-curl api-test trades {:symbol "BTCBUSD" :limit "1"}))
+ (bin-bash (make-curl config-test trades {:symbol "BTCBUSD" :limit "1"}))
 
- (->> (request api-test path-exchange-info {} {})
+ (->> (request config-test path-exchange-info {} {})
       deserialize-body)
- (bin-bash (make-curl api-test path-exchange-info {}))
+ (bin-bash (make-curl config-test path-exchange-info {}))
 
- (request api-test test-trade {:symbol "BTCBUSD"
-                               :side "BUY"
-                               :type "MARKET"
-                               ;;:timeInForce "GTC"
-                               :quantity 0.001
-                               :recvWindow 2000} {})
- (bin-bash (make-curl api-test test-trade {:symbol "BTCBUSD"
-                                           :side "BUY"
-                                           :type "MARKET"
-                                           ;;:timeInForce "GTC"
-                                           :quantity 0.001
-                                           :recvWindow 2000}))
+ (request config-test test-trade {:symbol "BTCBUSD"
+                                  :side "BUY"
+                                  :type "MARKET"
+                                  ;;:timeInForce "GTC"
+                                  :quantity 0.001
+                                  :recvWindow 2000} {})
+ (bash (make-curl config-test test-trade {:symbol "BTCBUSD"
+                                         :side "BUY"
+                                         :type "MARKET"
+                                         ;;:timeInForce "GTC"
+                                         :quantity 0.001
+                                         :recvWindow 2000}))
 
- (request api-test margin-priceIndex {:symbol "BTCBUSD"} {})
- (make-curl api-test margin-priceIndex {:symbol "BTCBUSD"})
- (bash (make-curl api-test margin-priceIndex {:symbol "BTCBUSD"}))
+ (request config-test margin-priceIndex {:symbol "BTCBUSD"} {})
+ (make-curl config-test margin-priceIndex {:symbol "BTCBUSD"})
+ (bash (make-curl config-test margin-priceIndex {:symbol "BTCBUSD"}))
  )
 
 
