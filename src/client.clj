@@ -49,13 +49,20 @@
 (defn expand [path] (:out (bash (str "echo -n " path))))
 (defn bin-bash [curl] (->> (bash curl) :out json/read-str))
 
-(defn deserialize-body [res] (update res :body json/read-str))
+(defn deserialize [x] (json/read-str x))
+(defn deserialize-body [res] (update res :body deserialize))
+(defn deserialize-out [res] (update res :out deserialize))
 
-(defn kwordize
+(defn kwordize-keys
   [xs]
   (if (sequential? xs)
     (map walk/keywordize-keys xs)
     (walk/keywordize-keys xs)))
+
+(defn- deserialize-kwordize-keys
+  [res]
+  (-> (deserialize-body res)
+      (update :body kwordize-keys)))
 
 (defn stringify-keys
   [xs]
@@ -85,6 +92,10 @@
     ;;(println "\nSECRET KEY" secret-key)
     ;;(println "\nSTRING-TO-SIGN\n" string-to-sign)
     (assoc query :signature (hmac-sha-256 secret-key string-to-sign))))
+
+(defn- string-lt-zero?
+  [str]
+  (> (Double/parseDouble str) 0))
 
 ;; --------------------------------------------------------------------------------
 ;; API and Security keys
@@ -119,43 +130,92 @@
 ;; Operations
 
 ;; Market Data
-(def path-exchange-info {:path "/exchangeInfo"
-                         :method :get
-                         :base-path :api
-                         :version 3
-                         :sign? false})
-(def ping "/ping")
-(def the-time "/time")
-(def trades {:path "/trades"
-             :method :get
-             :base-path :api
-             :version 3
-             :sign? false})
-(def price "/ticker/price")
-(def book-ticker "/ticker/bookTicker")
+(def ping
+  {:path "/ping"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? false})
+(def the-time
+  {:path "/time"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? false})
+(def system-status
+  {:path "/system/status"
+   :method :get
+   :base-path :sapi
+   :version 1
+   :sign? false})
+(def path-exchange-info
+  {:path "/exchangeInfo"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? false})
+(def trades
+  {:path "/trades"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? false})
+(def price "/ticker/price"
+  {:path "/ticker/price"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? false})
+(def book-ticker
+  {:path "/ticker/bookTicker"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? false})
 
 ;; Trade
-(def test-trade {:path "/order/test"
-                 :method :post
-                 :base-path :api
-                 :version 3
-                 :sign? true})
-
-(def account {:path "/account"
-              :method :get
-              :base-path :api
-              :version 3
-              :sign? true})
+(def trade-test
+  {:path "/order/test"
+   :method :post
+   :base-path :api
+   :version 3
+   :sign? true})
+(def trade-check-order
+  {:path "/order"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? true})
+(def trade-account
+  {:path "/account"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? true})
+(def trade-ratelimit-order
+  {:path "/rateLimit/order"
+   :method :get
+   :base-path :api
+   :version 3
+   :sign? true})
 
 ;; Margin
 ;;/sapi/v1/margin/priceIndex
-(def margin-priceIndex {:path "/margin/priceIndex"
-                        :method :get
-                        :base-path :sapi
-                        :version 1
-                        :sign? false})
+(def margin-priceIndex
+  {:path "/margin/priceIndex"
+   :method :get
+   :base-path :sapi
+   :version 1
+   :sign? false})
 
 ;; Wallet
+(def wallet-capital-config
+  {:path "/capital/config/getall"
+   :method :get
+   :base-path :sapi
+   :version 1
+   :sign? true})
+
 ;; Sub-Account
 ;; Stream
 
@@ -179,64 +239,97 @@
            sign? (merge {"X-MBX-APIKEY" (str (->> config :bin-keys :BINANCE_API_KEY))
                          :content-type :application/x-www-form-urlencoded})))
 
-(defn make-curl
+(defn curl-string
   [config {:keys [method sign?] :as op} query]
-  (format "curl%s%s -X %s '%s?%s'"
+  (format "curl -X %s '%s?%s' %s%s"
+          (method {:get "'GET'" :post "POST"})
+          (make-url config op)
+          (client/generate-query-string (make-query-params config query sign?))
           (if sign? (format " -H 'X-MBX-APIKEY: %s'" (->> config :bin-keys :BINANCE_API_KEY))
                     "")
-          " -H 'accept: application/json'"
-          (method {:get "GET" :post "POST"})
-          (make-url config op)
-          (client/generate-query-string (make-query-params config query sign?))))
+          " -H 'accept: application/json'"))
+
+(defn request-data
+  ([config {:keys [method sign?] :as op} params]
+   (request-data config op params {}))
+  ([config {:keys [method sign?] :as op} params headers]
+   {:method method
+    :url (make-url config op)
+    :data {:query-params (make-query-params config params sign?)
+           :headers (make-headers config headers sign?)}}))
 
 (defn request
-  [config {:keys [method sign?] :as op} params headers]
-  (let [url (make-url config op)
-        data {:query-params (make-query-params config params sign?)
-              :headers (make-headers config (merge headers {:accept :json}) sign?)}]
-
-    ;;todo mendel remove
-    (println "\nOPERATION" op)
-    (println "URL" url)
-    (println "DATA") (clojure.pprint/pprint data)
-
-    ((method http-methods) url data)))
+  [{:keys [method url data]}]
+  (try
+    ((method http-methods) url data)
+    (catch Exception e
+      (str "Request exception" e "\nMethod: " method "\nURL: " url "\nData: " data))))
 
 ;; --------------------------------------------------------------------------------
 ;; Playground
 
 (comment
 
- (deserialize-body (request config-test account {:recvWindow 20000} {}))
- (bin-bash (make-curl config-test account {:recvWindow 20000}))
+ (request (request-data config-test ping {}))
+ (->> (request (request-data config-test the-time {} {}))
+      deserialize-kwordize-keys :body :serverTime str-time)
+ (request (request-data config system-status {}))
 
- (->> (request config-test trades {:symbol "BTCBUSD" :limit "1"} {})
+ (->> (request (request-data config-test path-exchange-info {}))
       deserialize-body)
- (bin-bash (make-curl config-test trades {:symbol "BTCBUSD" :limit "1"}))
+ (bin-bash (curl-string config-test path-exchange-info {}))
 
- (->> (request config-test path-exchange-info {} {})
+ (->> (request (request-data config-test trades {:symbol "BTCBUSD" :limit "1"}))
       deserialize-body)
- (bin-bash (make-curl config-test path-exchange-info {}))
+ (bin-bash (curl-string config-test trades {:symbol "BTCBUSD" :limit "1"}))
 
- (request config-test test-trade {:symbol "BTCBUSD"
-                                  :side "BUY"
-                                  :type "MARKET"
-                                  ;;:timeInForce "GTC"
-                                  :quantity 0.001
-                                  :recvWindow 2000} {})
- (bash (make-curl config-test test-trade {:symbol "BTCBUSD"
-                                         :side "BUY"
-                                         :type "MARKET"
-                                         ;;:timeInForce "GTC"
-                                         :quantity 0.001
-                                         :recvWindow 2000}))
+ (->> (request (request-data config-test price {:symbol "BTCBUSD"}))
+      deserialize-body :body)
+ (bin-bash (curl-string config-test price {:symbol "BTCBUSD"}))
 
- (request config-test margin-priceIndex {:symbol "BTCBUSD"} {})
- (make-curl config-test margin-priceIndex {:symbol "BTCBUSD"})
- (bash (make-curl config-test margin-priceIndex {:symbol "BTCBUSD"}))
+ (->> (request (request-data config-test book-ticker {:symbol "BTCBUSD"}))
+      deserialize-body :body)
+ (bin-bash (curl-string config-test book-ticker {:symbol "BTCBUSD"}))
+
+ ;; Trade
+ (request (request-data config-test trade-test {:symbol "BTCBUSD"
+                                                :side "BUY"
+                                                :type "MARKET"
+                                                ;;:timeInForce "GTC"
+                                                :quantity 0.001
+                                                :recvWindow 2000}))
+ (bash (curl-string config-test trade-test {:symbol "BTCBUSD"
+                                            :side "BUY"
+                                            :type "MARKET"
+                                            ;;:timeInForce "GTC"
+                                            :quantity 0.001
+                                            :recvWindow 2000}))
+
+ (request (request-data config-test trade-check-order {:symbol "BTCBUSD"
+                                                       ;;:orderId 123
+                                                       ;;:origClientOrderId
+                                                       :recvWindow 2000}))
+ (bash (curl-string config-test trade-check-order {:symbol "BTCBUSD"
+                                                   ;;:orderId 123
+                                                   ;;:origClientOrderId
+                                                   :recvWindow 2000}))
+
+ (-> (:body (deserialize-kwordize-keys (request (request-data config-test trade-account {:recvWindow 20000} {}))))
+     (update :balances (fn [xs] (filter #(string-lt-zero? (:free %)) xs))))
+
+ (deserialize-body (request (request-data config-test trade-ratelimit-order {:recvWindow 20000} {})))
+
+ ;; Margin
+ (request (request-data config-test margin-priceIndex {:symbol "BTCBUSD"} {}))
+
+ ;; Wallet
+ (deserialize-body (request (request-data config wallet-capital-config {:recvWindow 2000} {})))
+ (deserialize-out (bash (curl-string config wallet-capital-config {:recvWindow 2000})))
+
  )
 
-
+"curl -X 'GET' 'https://testnet.binance.vision/sapi/v1/margin/priceIndex?symbol=BNBUSDT' -H 'accept: application/json'"
+"curl -X 'GET' 'https://testnet.binance.vision/sapi/v1/margin/priceIndex?symbol=BNBUSDT' -H 'accept: application/json'"
 
 ;; --------------------------------------------------------------------------------
 ;; Examples from
